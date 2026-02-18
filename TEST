@@ -1,0 +1,212 @@
+private void LoadBomMetadata(CircuitBoard board, string bomPath)
+{
+    if (string.IsNullOrEmpty(bomPath) || !System.IO.File.Exists(bomPath)) return;
+               
+    try
+    {
+        string extension = System.IO.Path.GetExtension(bomPath).ToLower();
+
+        void UpdateComponentType(Component comp, string desc, string mpn)
+        {
+            if (comp == null) return;
+
+            if (!string.IsNullOrEmpty(desc)) comp.Description = desc;
+            if (!string.IsNullOrEmpty(mpn)) comp.ManufacturerPartNumber = mpn;
+
+            string d = (desc + " " + mpn).ToUpper();
+
+            if (d.Contains("RES ") || d.Contains("RESISTOR") || d.StartsWith("RES")) comp.Type = ComponentType.Resistor;
+            else if (d.Contains("CAP ") || d.Contains("CAPACITOR") || d.StartsWith("CAP")) comp.Type = ComponentType.Capacitor;
+            else if (d.Contains("IND ") || d.Contains("INDUCTOR") || d.StartsWith("IND")) comp.Type = ComponentType.Inductor;
+            else if (d.Contains("LED")) comp.Type = ComponentType.LED;
+            else if (d.Contains("DIODE") || d.Contains("ZENER") || d.Contains("SCHOTTKY") || d.Contains("RECTIFIER") || mpn.StartsWith("BAT") || mpn.StartsWith("BZX") || mpn.StartsWith("1N"))
+            {
+                comp.Type = ComponentType.Diode;
+                if (d.Contains("ZENER") || d.Contains("BZX") || d.Contains("MMSZ")) comp.Type = ComponentType.Zener;
+                else if (d.Contains("SCHOTTKY") || d.Contains("BAT") || d.Contains("SS")) comp.Type = ComponentType.Schottky;
+            }
+            else if (d.Contains("MOSFET") || d.Contains("FET"))
+            {
+                if (d.Contains("N-CH") || d.Contains("N CH")) comp.Type = ComponentType.MosfetN;
+                else if (d.Contains("P-CH") || d.Contains("P CH")) comp.Type = ComponentType.MosfetP;
+                else comp.Type = ComponentType.MosfetN;
+            }
+            else if (d.Contains("TRANSISTOR") || d.Contains("NPN") || d.Contains("PNP"))
+            {
+                if (d.Contains("NPN")) comp.Type = ComponentType.NPN;
+                else if (d.Contains("PNP")) comp.Type = ComponentType.PNP;
+                else comp.Type = ComponentType.Transistor;
+            }
+            else if (d.Contains("IC") || d.StartsWith("U") || d.Contains("INTEGRATED")) comp.Type = ComponentType.IC;
+        }
+
+        void ProcessRowData(string rawDesignators, string description, string rawTolerance, string rawMpn, string rawInductance, string rawComment, string rawAaaComponent, CircuitBoard brd)
+        {
+            if (string.IsNullOrWhiteSpace(rawDesignators)) return;
+            string cleanRaw = rawDesignators.Replace("\n", ",").Replace("\r", ",").Replace("\t", ",").Replace("\u00A0", " ");
+            var parts = cleanRaw.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+
+            foreach (var part in parts)
+            {
+                string desName = part.Trim().Replace("\"", "");
+                if (string.IsNullOrWhiteSpace(desName)) continue;
+
+                var comp = brd.GetComponentByName(desName);                                               
+
+                if (comp != null)
+                {
+                    UpdateComponentType(comp, description, rawMpn);
+
+                    if (!string.IsNullOrEmpty(rawComment))
+                    {
+                        comp.Comment = rawComment.Trim();
+                    }
+
+                    // --- MANTIK HATASI DÜZELTİLDİ (ÖNCELİK SİSTEMİ) ---
+                    if (comp.ToleranceRatio == 0)
+                    {
+                        string finalTolerance = "";
+
+                        // 1. Tolerance Sütunu
+                        if (!string.IsNullOrWhiteSpace(rawTolerance))
+                            finalTolerance = rawTolerance.Trim().Replace("\"", "");
+                            
+                        // 2. Description Sütunu (Eğer üstteki boş geldiyse veya bulamadıysa)
+                        if (string.IsNullOrWhiteSpace(finalTolerance) && !string.IsNullOrWhiteSpace(description))
+                            finalTolerance = ExtractToleranceFromText(description);
+                            
+                        // 3. Comment Sütunu (Hala bulamadıysa)
+                        if (string.IsNullOrWhiteSpace(finalTolerance) && !string.IsNullOrWhiteSpace(rawComment))
+                            finalTolerance = ExtractToleranceFromText(rawComment);
+                            
+                        // 4. AAA-Component Sütunu (Hala bulamadıysa)
+                        if (string.IsNullOrWhiteSpace(finalTolerance) && !string.IsNullOrWhiteSpace(rawAaaComponent))
+                            finalTolerance = ExtractToleranceFromText(rawAaaComponent);
+
+                        if (!string.IsNullOrWhiteSpace(finalTolerance))
+                        {
+                            comp.SetToleranceFromString(finalTolerance);
+                        }
+                    }
+
+                    if (comp.Type == ComponentType.Inductor && comp.Value == 0 && !string.IsNullOrWhiteSpace(rawInductance))
+                    {
+                        comp.ParseValueWithUnit(rawInductance, "H");
+                    }
+                }
+            }
+        }
+
+        int FindCol(System.Data.DataTable t, int row, string keyword)
+        {
+            for (int c = 0; c < t.Columns.Count; c++)
+            {
+                string val = t.Rows[row][c]?.ToString().Trim().ToLower();
+                if (!string.IsNullOrEmpty(val))
+                {
+                    if (keyword == "mpn") { if (val.Contains("manufacturer part") || val.Contains("mfr part") || val.Contains("part number") || val == "mpn") return c; }
+                    else if (val.Contains(keyword)) return c;
+                }
+            }
+            return -1;
+        }
+
+        int FindColCsv(List<string> headers, string keyword)
+        {
+            for (int c = 0; c < headers.Count; c++)
+            {
+                string val = headers[c].Trim().Replace("\"", "").ToLower();
+                if (keyword == "mpn") { if (val.Contains("manufacturer part") || val.Contains("mfr part") || val.Contains("part number") || val == "mpn") return c; }
+                else if (val.Contains(keyword)) return c;
+            }
+            return -1;
+        }
+
+        if (extension == ".xlsx" || extension == ".xls")
+        {
+            System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
+            using (var stream = System.IO.File.Open(bomPath, System.IO.FileMode.Open, System.IO.FileAccess.Read))
+            {
+                using (var reader = ExcelReaderFactory.CreateReader(stream))
+                {
+                    var result = reader.AsDataSet(new ExcelDataSetConfiguration() { ConfigureDataTable = (_) => new ExcelDataTableConfiguration() { UseHeaderRow = false } });
+                    if (result.Tables.Count > 0)
+                    {
+                        DataTable table = result.Tables[0];
+                        int descIndex = -1, desigIndex = -1, tolIndex = -1, mpnIndex = -1, indIndex = -1, commentIndex = -1, aaaIndex = -1;
+                        int headerRowIndex = -1;
+
+                        for (int r = 0; r < Math.Min(20, table.Rows.Count); r++)
+                        {
+                            desigIndex = FindCol(table, r, "designator");
+                            descIndex = FindCol(table, r, "description");
+                            tolIndex = FindCol(table, r, "tolerance");
+                            mpnIndex = FindCol(table, r, "mpn");
+                            indIndex = FindCol(table, r, "inductance");
+                            commentIndex = FindCol(table, r, "comment");
+                            aaaIndex = FindCol(table, r, "aaa-component"); // YENİ EKLENDİ
+
+                            if (desigIndex != -1 && descIndex != -1) { headerRowIndex = r; break; }
+                        }
+
+                        if (headerRowIndex != -1)
+                        {
+                            for (int i = headerRowIndex + 1; i < table.Rows.Count; i++)
+                            {
+                                string rawDes = table.Rows[i][desigIndex]?.ToString() ?? "";
+                                string rawDesc = (descIndex != -1) ? (table.Rows[i][descIndex]?.ToString() ?? "") : "";
+                                string rawTol = (tolIndex != -1) ? (table.Rows[i][tolIndex]?.ToString() ?? "") : "";
+                                string rawMpn = (mpnIndex != -1) ? (table.Rows[i][mpnIndex]?.ToString() ?? "") : "";
+                                string rawInd = (indIndex != -1) ? (table.Rows[i][indIndex]?.ToString() ?? "") : "";
+                                string rawComment = (commentIndex != -1) ? (table.Rows[i][commentIndex]?.ToString() ?? "") : "";
+                                string rawAaa = (aaaIndex != -1) ? (table.Rows[i][aaaIndex]?.ToString() ?? "") : ""; 
+
+                                ProcessRowData(rawDes, rawDesc, rawTol, rawMpn, rawInd, rawComment, rawAaa, board); 
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            var lines = System.IO.File.ReadAllLines(bomPath, System.Text.Encoding.Default);
+            if (lines.Length >= 2)
+            {
+                char separator = lines[0].Split(';').Length > lines[0].Split(',').Length ? ';' : ',';
+                var headers = ParseCsvLine(lines[0], separator);
+
+                int descIndex = FindColCsv(headers, "description");
+                int desigIndex = FindColCsv(headers, "designator");
+                int tolIndex = FindColCsv(headers, "tolerance");
+                int mpnIndex = FindColCsv(headers, "mpn");
+                int indIndex = FindColCsv(headers, "inductance");
+                int commentIndex = FindColCsv(headers, "comment");
+                int aaaIndex = FindColCsv(headers, "aaa-component"); // YENİ EKLENDİ
+
+                if (descIndex != -1 && desigIndex != -1)
+                {
+                    for (int i = 1; i < lines.Length; i++)
+                    {
+                        var cols = ParseCsvLine(lines[i], separator);
+                        if (cols.Count <= descIndex || cols.Count <= desigIndex) continue;
+
+                        string rawDes = cols[desigIndex];
+                        string rawDesc = cols[descIndex];
+                        string rawTol = (tolIndex != -1 && cols.Count > tolIndex) ? cols[tolIndex] : "";
+                        string rawMpn = (mpnIndex != -1 && cols.Count > mpnIndex) ? cols[mpnIndex] : "";
+                        string rawInd = (indIndex != -1 && cols.Count > indIndex) ? cols[indIndex] : "";
+                        string rawComment = (commentIndex != -1 && cols.Count > commentIndex) ? cols[commentIndex] : ""; 
+                        string rawAaa = (aaaIndex != -1 && cols.Count > aaaIndex) ? cols[aaaIndex] : ""; 
+
+                        ProcessRowData(rawDes, rawDesc, rawTol, rawMpn, rawInd, rawComment, rawAaa, board); 
+                    }
+                }
+            }
+        }
+    }
+    catch (Exception ex)
+    {                
+        MessageBox.Show("Error reading BOM: " + ex.Message);
+    }
+}
